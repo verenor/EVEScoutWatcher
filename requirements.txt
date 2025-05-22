@@ -3,3 +3,4 @@ beautifulsoup4
 schedule
 selenium
 python-dotenv
+schedule

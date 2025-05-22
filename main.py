@@ -1,25 +1,22 @@
+import tkinter as tk
+from tkinter import messagebox
 import logging
-import os
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import schedule
+import time
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from email.mime.text import MIMEText
-from smtplib import SMTP
-from dotenv import load_dotenv
+from page_interaction import interact_with_page
+from email_utils import send_email
+import threading
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Load environment variables from .env file
-load_dotenv()
-
 URL = "https://www.eve-scout.com/#/"
-CHECK_STRING = "Haimeh"  # Replace with your condition
-CHECK_DISTANCE = 10  # Distance threshold
+scheduler_thread = None  # Global variable to manage the scheduler thread
+stop_scheduler = False  # Flag to stop the scheduler loop
 
 
 def setup_driver():
@@ -37,106 +34,114 @@ def load_website(driver, url):
     driver.get(url)
 
 
-def interact_with_page(driver, check_string, check_distance):
-    """Interact with the page and perform the required checks."""
-    try:
-        # Wait for the input field to be visible and enabled
-        input_field = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "input-field"))
-        )
-        if not input_field.is_displayed() or not input_field.is_enabled():
-            raise Exception("Input field is not interactable")
-
-        # Enter the search term into the input field
-        driver.execute_script(
-            "arguments[0].value = arguments[1];", input_field, check_string
-        )
-
-        # Wait for the refresh button to be clickable
-        refresh_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CLASS_NAME, "refresh-button"))
-        )
-        if not refresh_button.is_displayed() or not refresh_button.is_enabled():
-            raise Exception("Refresh button is not interactable")
-
-        # Click the refresh button
-        refresh_button.click()
-
-        # Wait for the rows to load
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.CLASS_NAME, "datatable-row"))
-        )
-
-        # Locate all rows with the class "datatable-row"
-        rows = driver.find_elements(By.CLASS_NAME, "datatable-row")
-        logging.info(f"Found {len(rows)} rows.")
-
-        # Check if the condition is met in any row
-        for row in rows:
-            columns = row.find_elements(By.TAG_NAME, "td")  # Get all columns in the row
-            if len(columns) >= 3:  # Ensure the row has at least 3 columns
-                distance = columns[2].text.strip()  # Get the third column (distance)
-                try:
-                    distance_value = float(distance)  # Convert distance to a float
-                    if distance_value <= check_distance:
-                        logging.info(
-                            f"Condition met: Distance {distance_value} <= {check_distance} in row: {row.text}"
-                        )
-                        send_email(
-                            subject="Condition Met on EVE Scout",
-                            body=f"The condition '{check_string}' was found with distance {distance_value} in the data table.",
-                        )
-                        break
-                except ValueError:
-                    logging.warning(f"Invalid distance value: {distance}")
-            else:
-                logging.warning(f"Row does not have enough columns: {row.text}")
-
-    except Exception as e:
-        logging.error(f"Error interacting with the page: {e}")
-        raise
-
-
-def send_email(subject, body):
-    """Send an email notification."""
-    # Retrieve email credentials from environment variables
-    email_user = os.getenv("EMAIL_USER")
-    email_pass = os.getenv("EMAIL_PASSWORD")
-    recipient = os.getenv("EMAIL_RECIPIENT", email_user)
-    try:
-        if not email_user or not email_pass:
-            raise Exception(
-                "Email credentials are missing. Please set them in the .env file."
-            )
-
-        # Set up the SMTP server
-        with SMTP("smtp.gmail.com", 587) as server:  # Replace with your SMTP server
-            server.starttls()
-            server.login(email_user, email_pass)
-
-            # Create the email
-            msg = MIMEText(body)
-            msg["Subject"] = subject
-            msg["From"] = email_user
-            msg["To"] = recipient
-
-            # Send the email
-            server.sendmail(email_user, recipient, msg.as_string())
-            logging.info("[+] Email sent successfully.")
-    except Exception as e:
-        logging.error(f"[!] Failed to send email: {e}")
-
-
 def check_website(url, check_string, check_distance):
     """Main function to check the website."""
     with setup_driver() as driver:
         try:
             load_website(driver, url)
-            interact_with_page(driver, check_string, check_distance)
+            interact_with_page(driver, check_string, check_distance, send_email)
         except Exception as e:
             logging.error(f"Error checking website: {e}")
 
 
-# Execute the function once
+def stop_script():
+    """Stop the script by clearing the schedule and stopping the thread."""
+    global stop_scheduler
+    try:
+        schedule.clear()  # Clear all scheduled tasks
+        stop_scheduler = True  # Set the flag to stop the scheduler loop
+        logging.info("Script stopped successfully.")
+        messagebox.showinfo("Success", "Script stopped successfully!")
+    except Exception as e:
+        logging.error(f"Error stopping script: {e}")
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
+
+def start_script(check_string_var, check_distance_var, interval_var):
+    """Start the script with the provided values."""
+    global scheduler_thread, stop_scheduler
+    try:
+        # Get values from the GUI
+        check_string = check_string_var.get()
+        check_distance = float(check_distance_var.get())
+        interval_mins = int(interval_var.get())
+
+        if not check_string:
+            raise ValueError("CHECK_STRING cannot be empty.")
+        if check_distance <= 0:
+            raise ValueError("CHECK_DISTANCE must be greater than 0.")
+        if interval_mins <= 0:
+            raise ValueError("SCRIPT_EXECUTION_INTERVAL_MINS must be greater than 0.")
+
+        # Schedule the script
+        schedule.clear()  # Clear any existing schedules
+        schedule.every(interval_mins).minutes.do(
+            check_website, URL, check_string, check_distance
+        )
+
+        logging.info(f"Scheduled the script to run every {interval_mins} minutes.")
+        messagebox.showinfo("Success", "Script started successfully!")
+
+        # Run the scheduler in a loop
+        def run_scheduler():
+            global stop_scheduler
+            while not stop_scheduler:
+                schedule.run_pending()
+                time.sleep(1)
+
+        # Start the scheduler in a new thread
+        stop_scheduler = False  # Reset the stop flag
+        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+        scheduler_thread.start()
+
+    except ValueError as e:
+        messagebox.showerror("Input Error", str(e))
+    except Exception as e:
+        logging.error(f"Error starting script: {e}")
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
+
+def create_gui():
+    """Create and display the GUI."""
+    root = tk.Tk()
+    root.title("Script Configuration")
+
+    # Input fields
+    tk.Label(root, text="System:").grid(row=0, column=0, padx=10, pady=5, sticky="e")
+    check_string_var = tk.StringVar()
+    tk.Entry(root, textvariable=check_string_var).grid(row=0, column=1, padx=10, pady=5)
+
+    tk.Label(root, text="Desired Distance:").grid(
+        row=1, column=0, padx=10, pady=5, sticky="e"
+    )
+    check_distance_var = tk.StringVar()
+    tk.Entry(root, textvariable=check_distance_var).grid(
+        row=1, column=1, padx=10, pady=5
+    )
+
+    tk.Label(root, text="Script Interval in Minutes:").grid(
+        row=2, column=0, padx=10, pady=5, sticky="e"
+    )
+    interval_var = tk.StringVar()
+    tk.Entry(root, textvariable=interval_var).grid(row=2, column=1, padx=10, pady=5)
+
+    # Start button
+    start_button = tk.Button(
+        root,
+        text="Start",
+        command=lambda: start_script(
+            check_string_var, check_distance_var, interval_var
+        ),
+    )
+    start_button.grid(row=3, column=0, pady=10)
+
+    # End button
+    end_button = tk.Button(root, text="End", command=stop_script)
+    end_button.grid(row=3, column=1, pady=10)
+
+    # Run the GUI
+    root.mainloop()
+
+
 if __name__ == "__main__":
-    check_website(URL, CHECK_STRING, CHECK_DISTANCE)
+    create_gui()
